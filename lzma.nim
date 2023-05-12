@@ -10,7 +10,8 @@ else:
 import os
 
 type
-    Pint* = ptr int
+    Pint* = ptr int64
+    Psizet* = ptr csize_t
     XZStream* {.final, pure.} = object
         nextIn*: cstring
         availIn*: int
@@ -113,9 +114,13 @@ proc lzma_easy_buffer_encode*(
     inString: cstring,
     inSize: int,
     outString: cstring,
-    outPos: Pint,
-    outSize: int): int {.cdecl, dynlib: liblzma, importc: "lzma_easy_buffer_encode".}
+    outPos: Psizet,
+    outSize: csize_t): int {.cdecl, dynlib: liblzma, importc: "lzma_easy_buffer_encode".}
     ## allocator set to nil to use malloc() and free()
+
+proc lzma_stream_buffer_bound*(
+    uncompressed_size: csize_t
+): csize_t {.cdecl, dynlib: liblzma, importc: "lzma_stream_buffer_bound".}
 
 proc lzma_stream_buffer_decode*(
     memlimit: Pint,
@@ -235,10 +240,10 @@ proc unxz*(source: string, rm=true): string =
 proc compress*(inString: cstring, preset=LZMA_PRESET_DEFAULT, check=LZMA_CHECK_CRC64): seq[byte] =
     var
         inSize = inString.len
-        outSize = inSize + (inSize shr 2) + 128
-        outString: array[BUFSIZ, byte]
-        outPos = 0
-        ret = lzma_easy_buffer_encode(preset, check, nil, inString, inSize, cast[cstring](addr outString), outPos.addr, outSize)
+        outSize : csize_t = lzma_stream_buffer_bound(cast[csize_t](inSize))
+        outString = newSeq[byte](outSize + 1)
+        outPos : csize_t = 0
+    var ret = lzma_easy_buffer_encode(preset, check, nil, inString, inSize, cast[cstring](outString[0].addr), outPos.addr, outSize)
     case ret:
         of LZMA_OK: discard
         of LZMA_BUF_ERROR: raise newException(XZlibStreamError, "Not enough output buffer space")
@@ -251,18 +256,23 @@ proc compress*(inString: cstring, preset=LZMA_PRESET_DEFAULT, check=LZMA_CHECK_C
 
 proc decompress*(inString: openArray[byte]): cstring =
     var
-        memlimit = high(int)
-        inBuf: array[BUFSIZ, byte]
+        memlimit = high(int64)
+        inBuf = newSeq[byte](inString.len)
         flags = 0.int32
-        inSize = BUFSIZ
-        outSize = BUFSIZ
-        outString: array[BUFSIZ, char]
+        inSize = inString.len
+        outSize = inSize * 2
+        outString = newSeq[byte](outSize)
         inPos = 0
         outPos = 0
     for i in 0..inString.len-1:
         inBuf[i] = inString[i]
     var
-        ret = lzma_stream_buffer_decode(memlimit.addr, flags, nil, cast[cstring](addr inBuf), inPos.addr, inSize, cast[cstring](addr outString), outPos.addr, outSize)
+        ret = lzma_stream_buffer_decode(memlimit.addr, flags, nil, cast[cstring](inBuf[0].addr), inPos.addr, inSize, cast[cstring](outString[0].addr), outPos.addr, outSize)
+    # If the compression ratio is really good, we may need to double the outbuf again
+    if ret == LZMA_BUF_ERROR:
+        outSize *= 2
+        outString = newSeq[byte](outSize)
+        ret = lzma_stream_buffer_decode(memlimit.addr, flags, nil, cast[cstring](inBuf[0].addr), inPos.addr, inSize, cast[cstring](outString[0].addr), outPos.addr, outSize)
     case ret:
         of LZMA_OK: discard
         of LZMA_FORMAT_ERROR: raise newException(XZlibStreamError, "The input is not in the .xz format")
@@ -273,7 +283,7 @@ proc decompress*(inString: openArray[byte]): cstring =
         of LZMA_BUF_ERROR: raise newException(XZlibStreamError, "Not enough output buffer space")
         of LZMA_PROG_ERROR: raise newException(XZlibStreamError, "Invalid decompression parameters")
         else: raise newException(XZlibStreamError, "Unknown error(" & $ret & "), possibly a bug")
-    result = cast[cstring](addr outString)
+    result = cast[cstring](outString[0].addr)
 
 when isMainModule:
     let s = cstring("The quick brown fox jumps over the lazy dog")
