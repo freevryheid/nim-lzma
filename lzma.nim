@@ -269,7 +269,7 @@ proc decompress*(inString: openArray[byte]): cstring =
     var
         ret = lzma_stream_buffer_decode(memlimit.addr, flags, nil, cast[cstring](inBuf[0].addr), inPos.addr, inSize, cast[cstring](outString[0].addr), outPos.addr, outSize)
     # If the compression ratio is really good, we may need to double the outbuf again
-    if ret == LZMA_BUF_ERROR:
+    while ret == LZMA_BUF_ERROR:
         outSize *= 2
         outString = newSeq[byte](outSize)
         ret = lzma_stream_buffer_decode(memlimit.addr, flags, nil, cast[cstring](inBuf[0].addr), inPos.addr, inSize, cast[cstring](outString[0].addr), outPos.addr, outSize)
