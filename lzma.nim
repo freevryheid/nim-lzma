@@ -10,7 +10,8 @@ else:
 import os
 
 type
-    Pint* = ptr int
+    Pint* = ptr int64
+    Psizet* = ptr csize_t
     XZStream* {.final, pure.} = object
         nextIn*: cstring
         availIn*: int
@@ -30,7 +31,7 @@ type
         reservedInt4*: int
         reservedEnum1*: int32
         reservedEnum2*: int32
-    XZlibStreamError* = object of Exception
+    XZlibStreamError* = object of ValueError
 
 const
     LZMA_PRESET_DEFAULT* = 6.int32  ## Default compression level
@@ -113,9 +114,13 @@ proc lzma_easy_buffer_encode*(
     inString: cstring,
     inSize: int,
     outString: cstring,
-    outPos: Pint,
-    outSize: int): int {.cdecl, dynlib: liblzma, importc: "lzma_easy_buffer_encode".}
+    outPos: Psizet,
+    outSize: csize_t): int {.cdecl, dynlib: liblzma, importc: "lzma_easy_buffer_encode".}
     ## allocator set to nil to use malloc() and free()
+
+proc lzma_stream_buffer_bound*(
+    uncompressed_size: csize_t
+): csize_t {.cdecl, dynlib: liblzma, importc: "lzma_stream_buffer_bound".}
 
 proc lzma_stream_buffer_decode*(
     memlimit: Pint,
@@ -132,9 +137,9 @@ proc lzma_stream_buffer_decode*(
 proc xz*(source: string, preset=LZMA_PRESET_DEFAULT, check=LZMA_CHECK_CRC64, rm=true): string =
     ## compresses source to source.xz and optionally deletes it
     ## returns compressed filename
-    if not source.existsFile:
+    if not source.fileExists:
         raise newException(OSError, "Uncompressed source file missing")
-    if existsFile(source & ".xz"):
+    if fileExists(source & ".xz"):
         raise newException(OSError, "Compressed target file already exists")
     var
         fin = open(source)
@@ -153,10 +158,10 @@ proc xz*(source: string, preset=LZMA_PRESET_DEFAULT, check=LZMA_CHECK_CRC64, rm=
         else: raise newException(XZlibStreamError, "Unknown error(" & $stat & "), possibly a bug")
     strm.nextIn = nil
     strm.availIn = 0
-    strm.nextOut = outbuf
+    strm.nextOut = cast[cstring](addr outbuf)
     strm.availOut = BUFSIZ
     while true:
-        strm.nextIn = inbuf
+        strm.nextIn = cast[cstring](addr inbuf)
         strm.availIn = fin.readBuffer(inbuf[0].addr, BUFSIZ)
         if strm.availIn == 0:
             action = LZMA_FINISH
@@ -164,7 +169,7 @@ proc xz*(source: string, preset=LZMA_PRESET_DEFAULT, check=LZMA_CHECK_CRC64, rm=
         if strm.availOut == 0 or ret == LZMA_STREAM_END:
             var writeSize = BUFSIZ - strm.availOut
             discard fout.writeBuffer(outbuf[0].addr, writeSize)
-            strm.nextOut = outbuf
+            strm.nextOut = cast[cstring](addr outbuf)
             strm.availOut = BUFSIZ
         if ret != LZMA_OK:
             if ret == LZMA_STREAM_END:
@@ -183,9 +188,9 @@ proc xz*(source: string, preset=LZMA_PRESET_DEFAULT, check=LZMA_CHECK_CRC64, rm=
 proc unxz*(source: string, rm=true): string =
     ## decompresses source.xz to source and optionally deletes it
     ## returns uncompressed filename
-    if not source.existsFile:
+    if not source.fileExists:
         raise newException(OSError, "Compressed source file missing")
-    if existsFile(source[0 .. ^4]):
+    if fileExists(source[0 .. ^4]):
         raise newException(OSError, "Uncompressed target file already exists")
     var
         fin = open(source)
@@ -203,17 +208,17 @@ proc unxz*(source: string, rm=true): string =
         else: raise newException(XZlibStreamError, "Unknown error(" & $stat & "), possibly a bug")
     strm.nextIn = nil
     strm.availIn = 0
-    strm.nextOut = outbuf
+    strm.nextOut = cast[cstring](addr outbuf)
     strm.availOut = BUFSIZ
     while true:
         if strm.availIn == 0:
-            strm.nextIn = inbuf
+            strm.nextIn = cast[cstring](addr inbuf)
             strm.availIn = fin.readBuffer(inbuf[0].addr, BUFSIZ)
         ret = lzma_code(strm, action)
         if strm.availOut == 0 or ret == LZMA_STREAM_END:
             var writeSize = BUFSIZ - strm.availOut
             discard fout.writeBuffer(outbuf[0].addr, writeSize)
-            strm.nextOut = outbuf
+            strm.nextOut = cast[cstring](addr outbuf)
             strm.availOut = BUFSIZ
         if ret != LZMA_OK:
             if ret == LZMA_STREAM_END:
@@ -232,13 +237,13 @@ proc unxz*(source: string, rm=true): string =
         removeFile(source)
     return source[0 .. ^4]
 
-proc compress*(inString: cstring, preset=LZMA_PRESET_DEFAULT, check=LZMA_CHECK_CRC64): cstring =
+proc compress*(inString: cstring, preset=LZMA_PRESET_DEFAULT, check=LZMA_CHECK_CRC64): seq[byte] =
     var
         inSize = inString.len
-        outSize = inSize + (inSize shr 2) + 128
-        outString: cstring = newStringOfCap(outSize)
-        outPos = 0
-        ret = lzma_easy_buffer_encode(preset, check, nil, inString, inSize, outString, outPos.addr, outSize)
+        outSize : csize_t = lzma_stream_buffer_bound(cast[csize_t](inSize))
+        outString = newSeq[byte](outSize + 1)
+        outPos : csize_t = 0
+    var ret = lzma_easy_buffer_encode(preset, check, nil, inString, inSize, cast[cstring](outString[0].addr), outPos.addr, outSize)
     case ret:
         of LZMA_OK: discard
         of LZMA_BUF_ERROR: raise newException(XZlibStreamError, "Not enough output buffer space")
@@ -247,18 +252,27 @@ proc compress*(inString: cstring, preset=LZMA_PRESET_DEFAULT, check=LZMA_CHECK_C
         of LZMA_DATA_ERROR: raise newException(XZlibStreamError, "Compressed string is corrupt")
         of LZMA_PROG_ERROR: raise newException(XZlibStreamError, "Invalid compression parameters")
         else: raise newException(XZlibStreamError, "Unknown error(" & $ret & "), possibly a bug")
-    result = outString
+    result = @outString[0..outPos]
 
-proc decompress*(inString: cstring): cstring =
+proc decompress*(inString: openArray[byte]): cstring =
     var
-        memlimit = high(int)
+        memlimit = high(int64)
+        inBuf = newSeq[byte](inString.len)
         flags = 0.int32
-        inSize = BUFSIZ
-        outSize = BUFSIZ
-        outString: cstring = newStringOfCap(BUFSIZ)
+        inSize = inString.len
+        outSize = inSize * 2
+        outString = newSeq[byte](outSize)
         inPos = 0
         outPos = 0
-        ret = lzma_stream_buffer_decode(memlimit.addr, flags, nil, inString, inPos.addr, inSize, outString, outPos.addr, outSize)
+    for i in 0..inString.len-1:
+        inBuf[i] = inString[i]
+    var
+        ret = lzma_stream_buffer_decode(memlimit.addr, flags, nil, cast[cstring](inBuf[0].addr), inPos.addr, inSize, cast[cstring](outString[0].addr), outPos.addr, outSize)
+    # If the compression ratio is really good, we may need to double the outbuf again
+    while ret == LZMA_BUF_ERROR:
+        outSize *= 2
+        outString = newSeq[byte](outSize)
+        ret = lzma_stream_buffer_decode(memlimit.addr, flags, nil, cast[cstring](inBuf[0].addr), inPos.addr, inSize, cast[cstring](outString[0].addr), outPos.addr, outSize)
     case ret:
         of LZMA_OK: discard
         of LZMA_FORMAT_ERROR: raise newException(XZlibStreamError, "The input is not in the .xz format")
@@ -269,8 +283,9 @@ proc decompress*(inString: cstring): cstring =
         of LZMA_BUF_ERROR: raise newException(XZlibStreamError, "Not enough output buffer space")
         of LZMA_PROG_ERROR: raise newException(XZlibStreamError, "Invalid decompression parameters")
         else: raise newException(XZlibStreamError, "Unknown error(" & $ret & "), possibly a bug")
-    result = outString
+    result = cast[cstring](outString[0].addr)
 
 when isMainModule:
-    let s = "The quick brown fox jumps over the lazy dog"
-    echo s.compress.decompress
+    let s = cstring("The quick brown fox jumps over the lazy dog")
+    echo(s.compress.decompress)
+

@@ -1,10 +1,10 @@
 # Package
 
-version       = "0.1.0"
+version       = "0.1.2"
 author        = "Anonymous"
 description   = "Wrapper for the lzma library"
 license       = "public domain"
 
 # Dependencies
 
-requires "nim >= 0.17.2"
+requires "nim >= 1.6.2"
